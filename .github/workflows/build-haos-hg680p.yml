@@ -1,0 +1,52 @@
+name: Build HAOS for HG680P
+
+on:
+  workflow_dispatch:  # bisa dijalankan manual dari tab Actions
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y kpartx qemu-utils xz-utils squashfs-tools parted dosfstools rsync curl jq
+
+      - name: Get latest HAOS version
+        id: haos_version
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/home-assistant/operating-system/releases/latest | jq -r .tag_name)
+          echo "LATEST=$LATEST" >> $GITHUB_ENV
+          echo "Latest HAOS release: $LATEST"
+
+      - name: Download HAOS generic aarch64
+        run: |
+          URL="https://github.com/home-assistant/operating-system/releases/download/${LATEST}/haos_generic-aarch64-${LATEST#v}.img.xz"
+          wget -q "$URL" -O haos_generic-aarch64.img.xz
+
+      - name: Download Armbian S905X minimal
+        run: |
+          wget -q https://redirect.armbian.com/amlogic-s905x/Bullseye_current -O armbian_s905x.img.xz
+          xz -d armbian_s905x.img.xz
+
+      - name: Run porting script
+        run: |
+          chmod +x haos_port_hg680p.sh
+          ./haos_port_hg680p.sh \
+            --haos haos_generic-aarch64.img.xz \
+            --armbian armbian_s905x.img \
+            --dtb meson-gxl-s905x-p212.dtb \
+            --out haos_hg680p.img
+
+      - name: Compress final image
+        run: |
+          xz -T0 -9 haos_hg680p.img
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: haos_hg680p_${{ env.LATEST }}
+          path: haos_hg680p.img.xz
