@@ -29,7 +29,7 @@ jobs:
 
       - name: Download Armbian S905X minimal
         run: |
-          wget -q https://redirect.armbian.com/amlogic-s905x/Bullseye_current -O armbian_s905x.img.xz
+          wget -q https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/Armbian_bullseye_save_2025.08/Armbian_25.08.0_amlogic_s905x_bullseye_6.1.147_server_2025.08.01.img.gz -O armbian_s905x.img.xz
           xz -d armbian_s905x.img.xz
 
       - name: Run porting script
