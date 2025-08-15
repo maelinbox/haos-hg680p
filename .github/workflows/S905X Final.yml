@@ -105,37 +105,7 @@ jobs:
         echo "HAOS boot contents:"
         sudo ls -la mnt/haos_boot || true
 
-    - name: Patch HAOS boot:copy kernel, dtb, boot scripts & backup originals
-      run: |
-        set -euxo pipefail
-        # backup HAOS boot
-        sudo mkdir -p mnt/haos_boot/backup_from_action
-        sudo cp -a mnt/haos_boot/* mnt/haos_boot/backup_from_action/ || true
-
-        # copy kernel, dtb, and boot scripts from Armbian (best-effort)
-        # If Armbian boot uses 'Image' or 'uImage' or zImage, copy them
-        sudo cp -av mnt/armbian_boot/Image mnt/haos_boot/ 2>/dev/null || true
-        sudo cp -av mnt/armbian_boot/zImage mnt/haos_boot/ 2>/dev/null || true
-        sudo cp -av mnt/armbian_boot/uImage mnt/haos_boot/ 2>/dev/null || true
-        sudo cp -av mnt/armbian_boot/*.dtb mnt/haos_boot/ 2>/dev/null || true
-        sudo cp -av mnt/armbian_boot/boot.scr mnt/haos_boot/ 2>/dev/null || true
-        sudo cp -av mnt/armbian_boot/uEnv.txt mnt/haos_boot/uEnv.txt 2>/dev/null || true
-
-        # ensure uEnv contains console for Amlogic and doesn't clobber existing root= if present
-        UENV="mnt/haos_boot/uEnv.txt"
-        if [ -f "$UENV" ]; then
-          sudo cp -a "$UENV" "${UENV}.bak_from_action" || true
-          if sudo grep -q '^bootargs=' "$UENV"; then
-            if ! sudo grep -q 'ttyAML0' "$UENV"; then
-              sudo sed -i "s/^bootargs=.*/& console=ttyAML0,115200n8 console=tty0 no_console_suspend/" "$UENV" || true
-            fi
-          else
-            echo 'bootargs=console=ttyAML0,115200n8 console=tty0 no_console_suspend' | sudo tee -a "$UENV"
-          fi
-        else
-          echo 'bootargs=console=ttyAML0,115200n8 console=tty0 no_console_suspend' | sudo tee "$UENV"
-        fi
-
+   
     - name: Merge firmware & modules (best-effort)
       run: |
         set -euxo pipefail
