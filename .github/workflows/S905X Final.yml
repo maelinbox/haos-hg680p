@@ -33,7 +33,7 @@ jobs:
     - name: Download HAOS Generic AArch64 (latest)
       run: |
         VERSION="${LATEST_TAG#v}"
-        HAOS_URL="https://github.com/home-assistant/operating-system/releases/download/${LATEST_TAG}/haos_generic-aarch64-${VERSION}.img.xz"
+        HAOS_URL="https://github.com/home-assistant/operating-system/releases/download/${LATEST_TAG}/haos_odroid-c2-${VERSION}.img.xz"
         echo "Downloading HAOS from: $HAOS_URL"
         wget --progress=dot:giga -O haos.img.xz "$HAOS_URL"
         xz -d -T0 haos.img.xz
