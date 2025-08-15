@@ -1,0 +1,205 @@
+name: Build HAOS for HG680P (S905X) - Final
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install required packages
+      run: |
+        sudo apt-get update -y
+        # util-linux contains losetup; kpartx/partx help manage loop partitions
+        sudo apt-get install -y --no-install-recommends \
+          util-linux kpartx xz-utils gzip wget parted squashfs-tools rsync
+
+    - name: Get latest HAOS release tag
+      id: haos_tag
+      run: |
+        TAG=$(curl -sS https://api.github.com/repos/home-assistant/operating-system/releases/latest | jq -r .tag_name)
+        if [ -z "$TAG" ]; then
+          echo "Failed to get HAOS tag" >&2
+          exit 1
+        fi
+        echo "LATEST_TAG=$TAG" >> $GITHUB_ENV
+        echo "Latest HAOS tag: $TAG"
+
+    - name: Download HAOS Generic AArch64 (latest)
+      run: |
+        VERSION="${LATEST_TAG#v}"
+        HAOS_URL="https://github.com/home-assistant/operating-system/releases/download/${LATEST_TAG}/haos_generic-aarch64-${VERSION}.img.xz"
+        echo "Downloading HAOS from: $HAOS_URL"
+        wget --progress=dot:giga -O haos.img.xz "$HAOS_URL"
+        xz -d -T0 haos.img.xz
+        ls -lh haos.img
+
+    - name: Download Ophub Armbian S905X image
+      run: |
+        ARMB_URL="https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/Armbian_bullseye_save_2025.08/Armbian_25.08.0_amlogic_s905x_bullseye_6.1.147_server_2025.08.01.img.gz"
+        echo "Downloading Armbian from: $ARMB_URL"
+        wget --progress=dot:giga -O armbian.img.gz "$ARMB_URL"
+        gunzip -c armbian.img.gz > armbian.img
+        ls -lh armbian.img
+
+    - name: Setup loop devices and mount partitions (auto-detect p1/p2)
+      run: |
+        set -euxo pipefail
+        mkdir -p work mnt/armbian_boot mnt/armbian_root mnt/haos_boot mnt/haos_root
+
+        # attach loops (losetup -fP will create /dev/loopXpY)
+        ARMB_LOOP=$(sudo losetup -fP --show armbian.img)
+        echo "ARMB_LOOP=$ARMB_LOOP"
+        HAOS_LOOP=$(sudo losetup -fP --show haos.img)
+        echo "HAOS_LOOP=$HAOS_LOOP"
+
+        # wait a moment for kernel to create partition devices
+        sleep 1
+
+        # identify p1/p2 for each loop by checking filesystem type
+        # function to find a partition with a given fs type (vfat or ext4) prefer vfat for boot
+        find_parts() {
+          local loop=$1
+          local boot=""
+          local root=""
+          for p in $(ls ${loop}p* 2>/dev/null || true); do
+            type=$(sudo blkid -o value -s TYPE "$p" || true)
+            if [ -z "$boot" ] && { [ "$type" = "vfat" ] || [ "$type" = "fat32" ]; }; then
+              boot="$p"
+            elif [ -z "$root" ] && { [ "$type" = "ext4" ] || [ "$type" = "squashfs" ] || [ "$type" = "ext2" ]; }; then
+              root="$p"
+            fi
+          done
+          # fallbacks
+          if [ -z "$boot" ]; then
+            boot=$(ls ${loop}p* 2>/dev/null | sed -n '1p' || true)
+          fi
+          if [ -z "$root" ]; then
+            root=$(ls ${loop}p* 2>/dev/null | sed -n '2p' || true)
+          fi
+          echo "$boot" "$root"
+        }
+
+        read ARMB_BOOT ARMB_ROOT < <(find_parts "$ARMB_LOOP")
+        read HAOS_BOOT HAOS_ROOT < <(find_parts "$HAOS_LOOP")
+
+        echo "ARMB_BOOT=$ARMB_BOOT"
+        echo "ARMB_ROOT=$ARMB_ROOT"
+        echo "HAOS_BOOT=$HAOS_BOOT"
+        echo "HAOS_ROOT=$HAOS_ROOT"
+
+        # mount partitions (some root partitions may not be directly mountable; we try best-effort)
+        if [ -n "$ARMB_BOOT" ]; then sudo mount "$ARMB_BOOT" mnt/armbian_boot; fi
+        if [ -n "$ARMB_ROOT" ]; then sudo mount "$ARMB_ROOT" mnt/armbian_root || true; fi
+        if [ -n "$HAOS_BOOT" ]; then sudo mount "$HAOS_BOOT" mnt/haos_boot; fi
+        if [ -n "$HAOS_ROOT" ]; then sudo mount "$HAOS_ROOT" mnt/haos_root || true; fi
+
+        # show basic listing for debugging
+        echo "Armbian boot contents:"
+        sudo ls -la mnt/armbian_boot || true
+        echo "HAOS boot contents:"
+        sudo ls -la mnt/haos_boot || true
+
+    - name: Patch HAOS boot: copy kernel, dtb, boot scripts & backup originals
+      run: |
+        set -euxo pipefail
+        # backup HAOS boot
+        sudo mkdir -p mnt/haos_boot/backup_from_action
+        sudo cp -a mnt/haos_boot/* mnt/haos_boot/backup_from_action/ || true
+
+        # copy kernel, dtb, and boot scripts from Armbian (best-effort)
+        # If Armbian boot uses 'Image' or 'uImage' or zImage, copy them
+        sudo cp -av mnt/armbian_boot/Image mnt/haos_boot/ 2>/dev/null || true
+        sudo cp -av mnt/armbian_boot/zImage mnt/haos_boot/ 2>/dev/null || true
+        sudo cp -av mnt/armbian_boot/uImage mnt/haos_boot/ 2>/dev/null || true
+        sudo cp -av mnt/armbian_boot/*.dtb mnt/haos_boot/ 2>/dev/null || true
+        sudo cp -av mnt/armbian_boot/boot.scr mnt/haos_boot/ 2>/dev/null || true
+        sudo cp -av mnt/armbian_boot/uEnv.txt mnt/haos_boot/uEnv.txt 2>/dev/null || true
+
+        # ensure uEnv contains console for Amlogic and doesn't clobber existing root= if present
+        UENV="mnt/haos_boot/uEnv.txt"
+        if [ -f "$UENV" ]; then
+          sudo cp -a "$UENV" "${UENV}.bak_from_action" || true
+          if sudo grep -q '^bootargs=' "$UENV"; then
+            if ! sudo grep -q 'ttyAML0' "$UENV"; then
+              sudo sed -i "s/^bootargs=.*/& console=ttyAML0,115200n8 console=tty0 no_console_suspend/" "$UENV" || true
+            fi
+          else
+            echo 'bootargs=console=ttyAML0,115200n8 console=tty0 no_console_suspend' | sudo tee -a "$UENV"
+          fi
+        else
+          echo 'bootargs=console=ttyAML0,115200n8 console=tty0 no_console_suspend' | sudo tee "$UENV"
+        fi
+
+    - name: Merge firmware & modules (best-effort)
+      run: |
+        set -euxo pipefail
+        # If HAOS root is mounted and has /lib, copy firmware and modules
+        if [ -d mnt/haos_root/lib ]; then
+          echo "HAOS root mounted; copying firmware and modules from Armbian root (if present)"
+          sudo mkdir -p mnt/haos_root/lib/firmware
+          sudo rsync -a --ignore-existing mnt/armbian_root/lib/firmware/ mnt/haos_root/lib/firmware/ || true
+          if [ -d mnt/armbian_root/lib/modules ]; then
+            sudo mkdir -p mnt/haos_root/lib/modules
+            sudo rsync -a --ignore-existing mnt/armbian_root/lib/modules/ mnt/haos_root/lib/modules/ || true
+          fi
+        else
+          # attempt to find squashfs inside HAOS (common HAOS layout)
+          SQF=$(sudo find mnt -type f -name '*.squashfs' -o -name '*.img' -path '*/HAOS/*' 2>/dev/null | head -n1 || true)
+          if [ -n "$SQF" ]; then
+            echo "Found squashfs at $SQF — will unsquash, merge, and repack (best-effort)"
+            sudo mkdir -p work/squash-root
+            sudo unsquashfs -f -d work/squash-root "$SQF"
+            if [ -d mnt/armbian_root/lib/firmware ]; then
+              sudo mkdir -p work/squash-root/lib/firmware
+              sudo rsync -a --ignore-existing mnt/armbian_root/lib/firmware/ work/squash-root/lib/firmware/
+            fi
+            if [ -d mnt/armbian_root/lib/modules ]; then
+              sudo mkdir -p work/squash-root/lib/modules
+              sudo rsync -a --ignore-existing mnt/armbian_root/lib/modules/ work/squash-root/lib/modules/
+            fi
+            # repack (use xz compression to reduce size)
+            sudo mv "$SQF" "${SQF}.bak_from_action" || true
+            sudo mksquashfs work/squash-root "$SQF" -comp xz -b 262144 -noappend -all-root || true
+            sudo rm -rf work/squash-root || true
+          else
+            echo "No mountable HAOS root or squashfs found; skipping firmware/modules merge"
+          fi
+        fi
+
+    - name: Sync, unmount and detach loop devices (cleanup)
+      run: |
+        set -euxo pipefail
+        sync || true
+        sudo umount mnt/armbian_boot || true
+        sudo umount mnt/armbian_root || true
+        sudo umount mnt/haos_boot || true
+        sudo umount mnt/haos_root || true
+        # detach all loop devices created by losetup -fP
+        for L in $(losetup -j armbian.img | cut -d: -f1); do sudo losetup -d $L || true; done || true
+        for L in $(losetup -j haos.img | cut -d: -f1); do sudo losetup -d $L || true; done || true
+
+        # move patched image back to workspace root (haos.img already modified in-place)
+        cp -v haos.img "$GITHUB_WORKSPACE/haos_hg680p_patched.img"
+
+    - name: Compress patched image (.xz)
+      run: |
+        cd "$GITHUB_WORKSPACE"
+        if [ -f haos_hg680p_patched.img ]; then
+          xz -T0 -9 haos_hg680p_patched.img
+          ls -lh haos_hg680p_patched.img.xz
+        else
+          echo "Patched image not found" >&2
+          exit 1
+        fi
+
+    - name: Upload artifact (patched HAOS image)
+      uses: actions/upload-artifact@v4
+      with:
+        name: haos_hg680p_patched_${{ env.LATEST_TAG }}
+        path: haos_hg680p_patched.img.xz
