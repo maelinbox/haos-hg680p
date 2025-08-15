@@ -1,0 +1,68 @@
+name: Testing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget xz-utils unzip gzip kpartx parted e2fsprogs
+
+      - name: Download Armbian for S905X
+        run: |
+          wget -q https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/Armbian_bullseye_save_2025.08/Armbian_25.08.0_amlogic_s905x_bullseye_6.1.147_server_2025.08.01.img.gz -O armbian.img.gz
+          gunzip armbian.img.gz
+          mv Armbian_*.img armbian.img
+
+      - name: Download HAOS Generic
+        run: |
+          wget -q https://github.com/home-assistant/operating-system/releases/download/16.1/haos_generic-aarch64-16.1.img.xz -O haos.img.xz
+          unxz haos.img.xz
+
+      - name: Get partition offsets
+        id: offsets
+        run: |
+          BOOT_OFFSET=$(parted armbian.img unit B print | grep -m 1 "fat" | awk '{print $2}' | tr -d B)
+          ROOT_OFFSET=$(parted armbian.img unit B print | grep -m 1 "ext4" | awk '{print $2}' | tr -d B)
+          HAOS_BOOT_OFFSET=$(parted haos.img unit B print | grep -m 1 "fat" | awk '{print $2}' | tr -d B)
+          HAOS_ROOT_OFFSET=$(parted haos.img unit B print | grep -m 1 "ext4" | awk '{print $2}' | tr -d B)
+          echo "BOOT_OFFSET=$BOOT_OFFSET" >> $GITHUB_ENV
+          echo "ROOT_OFFSET=$ROOT_OFFSET" >> $GITHUB_ENV
+          echo "HAOS_BOOT_OFFSET=$HAOS_BOOT_OFFSET" >> $GITHUB_ENV
+          echo "HAOS_ROOT_OFFSET=$HAOS_ROOT_OFFSET" >> $GITHUB_ENV
+
+      - name: Mount images
+        run: |
+          mkdir -p armbian_boot armbian_root haos_boot haos_root
+          sudo mount -o loop,offset=$BOOT_OFFSET armbian.img armbian_boot
+          sudo mount -o loop,offset=$ROOT_OFFSET armbian.img armbian_root
+          sudo mount -o loop,offset=$HAOS_BOOT_OFFSET haos.img haos_boot
+          sudo mount -o loop,offset=$HAOS_ROOT_OFFSET haos.img haos_root
+
+      - name: Copy boot files from Armbian to HAOS
+        run: |
+          sudo cp -r armbian_boot/* haos_boot/
+
+      - name: Unmount images
+        run: |
+          sudo umount armbian_boot || true
+          sudo umount armbian_root || true
+          sudo umount haos_boot || true
+          sudo umount haos_root || true
+
+      - name: Compress final image
+        run: |
+          gzip -c haos.img > haos_hg680p.img.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: haos_hg680p
+          path: haos_hg680p.img.gz
